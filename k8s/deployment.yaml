@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: linky-agent
+  namespace: linky
+  labels:
+    app: linky-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: linky-agent
+  template:
+    metadata:
+      labels:
+        app: linky-agent
+    spec:
+      containers:
+      - name: linky
+        image: linky:latest  # Update with your registry/image
+        imagePullPolicy: Always
+        env:
+        - name: RUN_MODE
+          valueFrom:
+            configMapKeyRef:
+              name: linky-config
+              key: RUN_MODE
+        - name: LINKEDIN_EMAIL
+          valueFrom:
+            secretKeyRef:
+              name: linky-secrets
+              key: linkedin-email
+        - name: LINKEDIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: linky-secrets
+              key: linkedin-password
+        - name: GEMINI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: linky-secrets
+              key: gemini-api-key
+        - name: DATABASE_URL
+          value: "postgresql://postgres:$(DATABASE_PASSWORD)@postgres-service:5432/linky"
+        - name: DATABASE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: linky-secrets
+              key: database-password
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: linky-config
+              key: LOG_LEVEL
+        - name: CAPTURE_SCREENSHOTS
+          valueFrom:
+            configMapKeyRef:
+              name: linky-config
+              key: CAPTURE_SCREENSHOTS
+        volumeMounts:
+        - name: linky-data
+          mountPath: /app/data
+        - name: linky-logs
+          mountPath: /app/logs
+        - name: linky-screenshots
+          mountPath: /app/screenshots
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        livenessProbe:
+          exec:
+            command:
+            - node
+            - -e
+            - "console.log('alive')"
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          exec:
+            command:
+            - node
+            - -e
+            - "console.log('ready')"
+          initialDelaySeconds: 10
+          periodSeconds: 10
+      volumes:
+      - name: linky-data
+        persistentVolumeClaim:
+          claimName: linky-data-pvc
+      - name: linky-logs
+        emptyDir: {}
+      - name: linky-screenshots
+        emptyDir: {}
+      restartPolicy: Always

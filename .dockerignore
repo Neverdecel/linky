@@ -1,0 +1,15 @@
+node_modules/
+npm-debug.log
+.env
+.env.local
+dist/
+logs/
+screenshots/
+data/response-history.json
+data/planned-responses/
+.git/
+.gitignore
+.dockerignore
+Dockerfile
+.DS_Store
+*.log

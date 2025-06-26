@@ -1,0 +1,57 @@
+{
+  "name": "linky",
+  "version": "1.0.0",
+  "description": "AI-powered LinkedIn automation agent that intelligently responds to recruiters based on your job preferences and requirements",
+  "main": "dist/index.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "dev": "nodemon --exec tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "start:safe": "RUN_MODE=safe npm start",
+    "start:debug": "RUN_MODE=debug npm start",
+    "start:prod": "RUN_MODE=production npm start",
+    "setup": "tsx scripts/setup.ts",
+    "view:responses": "node scripts/view-responses.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "linkedin",
+    "automation",
+    "ai",
+    "recruiter",
+    "job-search",
+    "gemini",
+    "playwright",
+    "typescript"
+  ],
+  "author": "Linky Contributors",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Neverdecel/linky.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Neverdecel/linky/issues"
+  },
+  "homepage": "https://github.com/Neverdecel/linky#readme",
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^24.0.4",
+    "nodemon": "^3.1.10",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "@types/pg": "^8.15.4",
+    "dotenv": "^16.5.0",
+    "js-yaml": "^4.1.0",
+    "node-cron": "^4.1.1",
+    "pg": "^8.16.2",
+    "playwright": "^1.53.1",
+    "winston": "^3.17.0"
+  }
+}

@@ -1,0 +1,75 @@
+# Linky - Profile Configuration Template
+# Copy this file to profile.yaml and customize with your details
+
+personal:
+  name: "Your Name"
+  current_role: "Software Engineer"
+  location: "Amsterdam, Netherlands"
+  
+current_situation:
+  salary: 75000
+  currency: EUR
+  hours_per_week: 40
+  
+dream_job:
+  title: "Senior Platform Engineer"
+  description: "Building scalable infrastructure at an innovative company"
+  
+requirements:
+  salary:
+    minimum: 85000
+    ideal: 95000
+    currency: EUR
+    
+  schedule:
+    days_per_week: 4
+    hours_per_day: 8
+    
+  location:
+    max_commute_minutes: 45
+    remote_days_min: 2
+    office_days_max: 3
+    
+  must_have:
+    - "Modern tech stack"
+    - "Hybrid work options"
+    - "Good work-life balance"
+    - "Growth opportunities"
+    
+  nice_to_have:
+    - "International team"
+    - "Conference budget"
+    - "Open source contributions"
+    - "Learning and development budget"
+    
+skills:
+  - Docker
+  - Kubernetes
+  - AWS
+  - Python
+  - JavaScript
+  - React
+  - Node.js
+  - PostgreSQL
+  
+interests:
+  - "Cloud infrastructure"
+  - "DevOps automation"
+  - "Scalable systems"
+  - "Team leadership"
+  
+preferences:
+  company_types:
+    prefer:
+      - "Scale-up (50-500 employees)"
+      - "Product-focused company"
+      - "Tech company"
+      - "SaaS platform"
+    avoid:
+      - "Large consultancy firms"
+      - "Agencies"
+      - "Companies with legacy tech"
+
+ai_disclosure:
+  enabled: false  # Set to true to add AI assistance disclosure to messages
+  message: "✨ AI-assisted response"  # Simple, friendly disclosure message

@@ -1,0 +1,58 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: linky-scheduled-run
+  namespace: linky
+spec:
+  schedule: "*/30 * * * *"  # Run every 30 minutes
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: linky
+            image: linky:latest  # Update with your registry/image
+            imagePullPolicy: Always
+            env:
+            - name: RUN_MODE
+              value: "production"  # Force production mode for scheduled runs
+            - name: LINKEDIN_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: linky-secrets
+                  key: linkedin-email
+            - name: LINKEDIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: linky-secrets
+                  key: linkedin-password
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: linky-secrets
+                  key: gemini-api-key
+            - name: DATABASE_URL
+              value: "postgresql://postgres:$(DATABASE_PASSWORD)@postgres-service:5432/linky"
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: linky-secrets
+                  key: database-password
+            volumeMounts:
+            - name: linky-data
+              mountPath: /app/data
+            resources:
+              requests:
+                memory: "1Gi"
+                cpu: "500m"
+              limits:
+                memory: "2Gi"
+                cpu: "1000m"
+          volumes:
+          - name: linky-data
+            persistentVolumeClaim:
+              claimName: linky-data-pvc
+          restartPolicy: OnFailure

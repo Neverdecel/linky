@@ -1,0 +1,69 @@
+version: '3.8'
+
+services:
+  linky:
+    build: 
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: linky-agent
+    environment:
+      - RUN_MODE=${RUN_MODE:-safe}
+      - DATABASE_URL=postgresql://postgres:password@db:5432/linky
+      - LINKEDIN_EMAIL=${LINKEDIN_EMAIL}
+      - LINKEDIN_PASSWORD=${LINKEDIN_PASSWORD}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - LOG_LEVEL=${LOG_LEVEL:-debug}
+      - CAPTURE_SCREENSHOTS=true
+    volumes:
+      - ../logs:/app/logs
+      - ../screenshots:/app/screenshots
+      - ../data:/app/data
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - linky-network
+    restart: unless-stopped
+
+  db:
+    image: postgres:15-alpine
+    container_name: linky-db
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=linky
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - linky-network
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: ../dashboard
+      dockerfile: Dockerfile
+    container_name: linky-dashboard
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@db:5432/linky
+      - NODE_ENV=production
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - linky-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+
+networks:
+  linky-network:
+    driver: bridge

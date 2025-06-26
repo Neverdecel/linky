@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: linky-config
+  namespace: linky
+data:
+  RUN_MODE: "safe"
+  LOG_LEVEL: "info"
+  CAPTURE_SCREENSHOTS: "true"
+  MOCK_DELAY_MS: "2000"
+  GEMINI_MODEL: "gemini-pro"
+  GEMINI_TEMPERATURE: "0.7"
+  DATABASE_HOST: "postgres-service"
+  DATABASE_PORT: "5432"
+  DATABASE_NAME: "linky"

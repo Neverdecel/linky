@@ -1,5 +1,20 @@
 # Linky 🤖
 
+> **⚠️ IMPORTANT LEGAL & ETHICAL DISCLAIMER**
+> 
+> **Use at Your Own Risk**: This tool automates LinkedIn interactions and may violate LinkedIn's Terms of Service. Users are solely responsible for ensuring compliance with LinkedIn's policies and applicable laws in their jurisdiction.
+>
+> **Ethical Use Only**: Linky is designed for intelligent, respectful communication with recruiters - not for spam or deceptive practices. We strongly recommend:
+> - ✅ Always test thoroughly in **Safe Mode** before production use
+> - ✅ Consider enabling AI disclosure to maintain transparency  
+> - ✅ Use for genuine job searching and professional networking only
+> - ✅ Respect recruiter time with thoughtful, relevant responses
+> - ❌ Never use for mass messaging or inappropriate content
+>
+> **No Warranty**: This software is provided "as-is" without any guarantees. The authors are not responsible for account restrictions, policy violations, or other consequences of use.
+>
+> **Platform Risk**: LinkedIn actively works to detect and prevent automation. Your account may be restricted or banned for using any automation tools, regardless of their design or intent.
+
 An intelligent LinkedIn automation agent that responds to recruiter messages using Google Gemini AI. Linky analyzes job opportunities against your personal preferences and generates contextual responses to help streamline your job search process.
 
 ## ✨ Features

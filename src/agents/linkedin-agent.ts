@@ -339,10 +339,12 @@ export class LinkedInAgent {
       // Fallback to direct navigation
       if (!navigationSuccess) {
         logger.info('Direct navigation to messaging URL');
-        await this.safeModeHandler.navigate(
-          this.page,
-          'https://www.linkedin.com/messaging/'
-        );
+        // Don't use safeModeHandler.navigate() for messaging - it waits for networkidle
+        // LinkedIn messaging has constant activity so we need a different approach
+        await this.page.goto('https://www.linkedin.com/messaging/', {
+          waitUntil: 'domcontentloaded', // Just wait for DOM, not network idle
+          timeout: 15000,
+        });
       }
       
       // Don't wait for networkidle - messaging page has constant activity  

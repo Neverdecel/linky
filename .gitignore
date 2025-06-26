@@ -72,3 +72,11 @@ pids
 
 # Yarn Integrity file
 .yarn-integrity
+
+# Claude Code files
+.claude
+
+# Development/writing files
+medium-article.md
+*.draft.md
+writing/

@@ -272,6 +272,10 @@ export class YamlConfig {
     return this.conversations.get(conversationId);
   }
 
+  public clearConversationHistory(conversationId: string): void {
+    this.conversations.delete(conversationId);
+  }
+
   public async calculateMatchScore(_opportunityText: string): Promise<number> {
     // This would be called by the GeminiClient using LLM analysis
     // The LLM will analyze the opportunity against personal priorities

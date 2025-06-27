@@ -15,7 +15,7 @@ export class ResponseTracker {
   private responses: Map<string, ResponseRecord>;
 
   constructor() {
-    // Store response history in logs directory for debugging
+    // Store response history in global logs directory for conversation continuity
     const logDir = path.join(process.cwd(), 'logs');
     this.dataFile = path.join(logDir, 'response-history.json');
     this.responses = new Map();
@@ -34,7 +34,7 @@ export class ResponseTracker {
       });
       
       logger.info('Response history loaded', { 
-        totalResponses: this.responses.size 
+        totalResponses: this.responses.size
       });
     } catch (error) {
       // File doesn't exist or is corrupt, start fresh

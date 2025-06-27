@@ -579,6 +579,89 @@ export class LinkedInAgent {
   }
 
 
+  async extractFullConversation(conversationId: string, senderName: string): Promise<ConversationMessage[]> {
+    const messages: ConversationMessage[] = [];
+    
+    try {
+      if (!this.page) {
+        throw new Error('Page not available');
+      }
+
+      // Try to find and click the conversation thread
+      const conversationSelector = `[data-control-name="conversation_item_${senderName.toLowerCase().replace(/\s+/g, '_')}"], 
+                                   .msg-conversation-listitem:has-text("${senderName}")`;
+      
+      logger.debug('Attempting to extract full conversation', { 
+        conversationId, 
+        senderName 
+      });
+
+      // Click on the conversation to open it
+      try {
+        await this.page.click(conversationSelector, { timeout: 5000 });
+        await this.page.waitForTimeout(2000); // Wait for conversation to load
+      } catch (error) {
+        logger.warn('Could not click specific conversation, using current conversation', { 
+          senderName, 
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+
+      // Extract all messages from the conversation thread
+      const messageElements = await this.page.$$('.msg-s-message-list__event');
+      
+      for (const messageElement of messageElements) {
+        try {
+          // Check if this is a message (not other events like connection requests)
+          const isMessage = await messageElement.$('.msg-s-event-listitem__body') !== null;
+          if (!isMessage) continue;
+
+          // Extract sender information
+          const senderElement = await messageElement.$('.msg-s-message-group__name');
+          const messageSender = senderElement 
+            ? await senderElement.textContent() 
+            : 'Unknown';
+
+          // Determine if it's from us or the recruiter
+          const isOurMessage = messageSender?.includes('You') || messageSender === 'You';
+          const sender = isOurMessage ? 'user' : 'recruiter';
+
+          // Extract message content
+          const contentElement = await messageElement.$('.msg-s-event-listitem__body .msg-s-event-listitem__content');
+          const content = contentElement 
+            ? (await contentElement.textContent())?.trim() || ''
+            : '';
+
+          if (content && content.length > 0) {
+            // Extract timestamp (simplified - could be enhanced)
+            const timestamp = new Date(); // LinkedIn timestamps are complex, using current time as fallback
+
+            messages.push({
+              sender,
+              content,
+              timestamp
+            });
+          }
+        } catch (error) {
+          logger.debug('Failed to extract individual message', { error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+
+      logger.debug('Extracted conversation history from LinkedIn', { 
+        conversationId,
+        messageCount: messages.length 
+      });
+
+    } catch (error) {
+      logger.warn('Failed to extract full conversation from LinkedIn', { 
+        conversationId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+
+    return messages;
+  }
+
   async processMessage(message: LinkedInMessage): Promise<void> {
     try {
       logger.info('Processing message', { 
@@ -640,49 +723,93 @@ export class LinkedInAgent {
           const yamlConfig = this.geminiClient['yamlConfig']; // Access private property
           let conversationHistory = yamlConfig.getConversationHistory(conversationId);
           
-          // If no conversation history exists but we have response history, reconstruct it
-          if (!conversationHistory) {
+          // PRIORITY 1: Extract actual conversation from LinkedIn
+          logger.info('🔍 Extracting current conversation state from LinkedIn', { conversationId });
+          const linkedInMessages = await this.extractFullConversation(conversationId, message.senderName);
+          
+          if (linkedInMessages.length > 0) {
+            // Clear existing conversation and rebuild from LinkedIn
+            yamlConfig.clearConversationHistory(conversationId);
+            
+            // Add all LinkedIn messages to conversation history
+            for (const msg of linkedInMessages) {
+              yamlConfig.updateConversationHistory(conversationId, msg);
+            }
+            
+            // Determine phase based on conversation length
+            const history = yamlConfig.getConversationHistory(conversationId);
+            if (history) {
+              if (history.messages.length > 2) {
+                history.currentPhase = 'follow_up';
+              } else {
+                history.currentPhase = 'initial';
+              }
+            }
+            
+            logger.info('✅ Conversation state synchronized from LinkedIn', {
+              conversationId,
+              messageCount: linkedInMessages.length,
+              phase: history?.currentPhase
+            });
+          } else {
+            // FALLBACK: LinkedIn extraction failed, start fresh conversation
+            logger.warn('🔄 LinkedIn extraction failed, starting fresh conversation');
+            
+            // For known recruiters (from response history), set phase to follow_up
+            // but don't reconstruct fake conversation history
             const responseHistory = await this.responseTracker.getResponseHistory();
             const previousResponse = responseHistory.find(r => r.conversationId === conversationId);
             
             if (previousResponse) {
-              // Reconstruct conversation history from response tracker
-              yamlConfig.updateConversationHistory(conversationId, {
-                sender: 'recruiter',
-                content: previousResponse.messageContent,
-                timestamp: new Date(previousResponse.respondedAt.getTime() - 1000) // 1 second before our response
-              });
-              
-              yamlConfig.updateConversationHistory(conversationId, {
-                sender: 'user',
-                content: previousResponse.generatedResponse,
-                timestamp: previousResponse.respondedAt
-              });
-              
-              // Update the phase to follow_up since this is a continuation
+              // We know this is a follow-up conversation, but start fresh
               const history = yamlConfig.getConversationHistory(conversationId);
               if (history) {
                 history.currentPhase = 'follow_up';
+                logger.debug('Set known recruiter conversation to follow_up phase', {
+                  conversationId,
+                  previousResponseDate: previousResponse.respondedAt
+                });
               }
-              
-              logger.debug('Reconstructed conversation history from response tracker', {
-                conversationId,
-                messageCount: history?.messages.length,
-                phase: history?.currentPhase
-              });
             }
           }
           
           conversationHistory = yamlConfig.getConversationHistory(conversationId);
           
-          // Add the recruiter's message to conversation history
-          const recruiterMessage: ConversationMessage = {
-            sender: 'recruiter',
-            content: message.content,
-            timestamp: new Date()
-          };
+          // Only add the current recruiter message if it's not already in the conversation
+          if (conversationHistory) {
+            const lastMessage = conversationHistory.messages[conversationHistory.messages.length - 1];
+            const isCurrentMessageAlreadyAdded = lastMessage && 
+              lastMessage.sender === 'recruiter' && 
+              lastMessage.content.trim() === message.content.trim();
+              
+            if (!isCurrentMessageAlreadyAdded) {
+              const recruiterMessage: ConversationMessage = {
+                sender: 'recruiter',
+                content: message.content,
+                timestamp: new Date()
+              };
+              
+              yamlConfig.updateConversationHistory(conversationId, recruiterMessage);
+              logger.debug('Added current recruiter message to conversation', { 
+                conversationId,
+                messageLength: message.content.length 
+              });
+            } else {
+              logger.debug('Current recruiter message already exists in conversation', { 
+                conversationId 
+              });
+            }
+          } else {
+            // First message in conversation
+            const recruiterMessage: ConversationMessage = {
+              sender: 'recruiter',
+              content: message.content,
+              timestamp: new Date()
+            };
+            
+            yamlConfig.updateConversationHistory(conversationId, recruiterMessage);
+          }
           
-          yamlConfig.updateConversationHistory(conversationId, recruiterMessage);
           conversationHistory = yamlConfig.getConversationHistory(conversationId);
           
           // Generate response using the new conversational system
@@ -692,7 +819,7 @@ export class LinkedInAgent {
             conversationHistory
           );
           
-          // Add our response to conversation history
+          // Add our response to conversation history (avoid duplicates)
           const userMessage: ConversationMessage = {
             sender: 'user',
             content: response,
@@ -705,11 +832,14 @@ export class LinkedInAgent {
           logger.info(`"${response}"`);
           logger.info(`\n📝 Response saved but NOT sent (safe mode)`);
           
-          // Log the response for fine-tuning
+          // Detect language using AI and log the response for fine-tuning
+          const detectedLanguage = await this.geminiClient.detectLanguage(message.content);
           responseLogger.logResponse(
             message.senderName,
             message.content,
-            response
+            response,
+            detectedLanguage,
+            conversationHistory
           );
           
           // Track that we've responded

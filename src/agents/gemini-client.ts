@@ -45,6 +45,29 @@ export class GeminiClient {
     this.responseTracker = responseTracker;
   }
 
+  async detectLanguage(text: string): Promise<string> {
+    const prompt = `Detect the primary language of this text. Respond with only the ISO 639-1 language code (e.g., "en" for English, "nl" for Dutch, "de" for German, etc.).
+
+Text: "${this.sanitizeInput(text)}"`;
+    
+    try {
+      const result = await this.model.generateContent({
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 0.1,
+          maxOutputTokens: 5,
+        },
+      });
+      
+      const language = result.response.text().trim().toLowerCase();
+      logger.debug('Language detected', { language, textLength: text.length });
+      return language;
+    } catch (error) {
+      logger.error('Failed to detect language', { error });
+      return 'auto'; // Fallback
+    }
+  }
+
   // Basic input sanitization to prevent obvious prompt injection attempts
   private sanitizeInput(content: string): string {
     return content
@@ -53,23 +76,17 @@ export class GeminiClient {
       .trim();
   }
 
-  // Detect if message content suggests Dutch language
-  private isDutchMessage(content: string): boolean {
-    const dutchIndicators = /\b(de|het|een|van|voor|met|in|is|zijn|heb|kan|wil|graag|bedankt|mvg|groeten)\b/gi;
-    const matches = content.match(dutchIndicators);
-    return matches ? matches.length > 2 : false;
-  }
 
   // Add AI disclosure to response if enabled
-  private addAIDisclosure(response: string, messageContent: string): string {
+  private async addAIDisclosure(response: string, messageContent: string): Promise<string> {
     const profile = this.yamlConfig.getProfile();
     
     if (!profile.ai_disclosure?.enabled) {
       return response;
     }
 
-    const isDutch = this.isDutchMessage(messageContent);
-    const disclosure = isDutch 
+    const language = await this.detectLanguage(messageContent);
+    const disclosure = language === 'nl' 
       ? "✨ AI-ondersteunde reactie"
       : profile.ai_disclosure.message;
 
@@ -152,7 +169,7 @@ export class GeminiClient {
       });
 
       // Add AI disclosure if enabled
-      const finalResponse = this.addAIDisclosure(response.trim(), message.content);
+      const finalResponse = await this.addAIDisclosure(response.trim(), message.content);
       
       return finalResponse;
     } catch (error) {

@@ -5,10 +5,13 @@ An intelligent LinkedIn automation agent that responds to recruiter messages usi
 ## ✨ Features
 
 - **AI-Powered Conversations**: Uses Google Gemini to generate intelligent, contextual responses
+- **Strategic Conversation Management**: ADK-powered conversation planning for optimal outcomes
 - **Recruiter Type Detection**: Automatically identifies internal vs external recruiters
 - **Dynamic Question Generation**: Asks relevant questions based on your profile and job requirements
-- **Multi-turn Conversations**: Supports follow-up responses and ongoing conversations
-- **Salary Discretion**: Strategically extracts salary ranges without revealing your expectations
+- **Multi-turn Conversations**: Context-aware follow-up responses with conversation history
+- **Salary Negotiation Strategy**: Strategically extracts salary ranges without revealing your expectations
+- **Phone Call Deflection**: Maintains control by steering toward written communication
+- **Conversation State Tracking**: Persistent conversation history across sessions
 - **Bilingual Support**: Responds appropriately in Dutch or English
 - **Safety Features**: Built-in prompt injection protection and safe mode testing
 - **Optional AI Disclosure**: Configurable transparency about AI assistance
@@ -123,12 +126,14 @@ npm run view:responses
 ## 🏗️ How It Works
 
 1. **Message Analysis**: Scans LinkedIn messages for recruiter communications
-2. **Recruiter Classification**: Identifies if recruiter is internal or external
-3. **Profile Matching**: Analyzes job opportunity against your preferences
-4. **Dynamic Questions**: Generates relevant questions based on missing information
-5. **Response Generation**: Creates contextual, professional responses
-6. **Safety Checks**: Validates responses before sending
-7. **Conversation Tracking**: Maintains context for follow-up interactions
+2. **Recruiter Classification**: Identifies if recruiter is internal or external using conversation history
+3. **Strategic Analysis**: ADK-powered multi-step conversation planning and goal optimization
+4. **Profile Matching**: Analyzes job opportunity against your preferences and priorities
+5. **Dynamic Questions**: Generates strategically sequenced questions based on conversation goals
+6. **Response Generation**: Creates contextual, goal-oriented professional responses
+7. **Response Optimization**: Strategic enhancement for maximum conversation control
+8. **Safety Checks**: Validates responses before sending
+9. **Conversation Tracking**: Persistent context and history across multiple sessions
 
 ## 📁 Project Structure
 
@@ -136,10 +141,14 @@ npm run view:responses
 linky/
 ├── src/
 │   ├── agents/              # Core automation agents
-│   │   ├── linkedin-agent.ts    # LinkedIn interaction logic
-│   │   ├── gemini-client.ts     # AI response generation
-│   │   └── safe-mode-handler.ts # Message sending logic
+│   │   ├── linkedin-agent.ts         # LinkedIn interaction logic
+│   │   ├── gemini-client.ts          # AI response generation
+│   │   ├── conversation-strategy-agent.ts # ADK strategic conversation planning
+│   │   └── safe-mode-handler.ts      # Message sending logic
 │   ├── utils/               # Utilities and helpers
+│   │   ├── adk-prompt-templates.ts   # ADK conversation optimization prompts
+│   │   ├── yaml-config.ts            # Configuration management
+│   │   └── response-tracker.ts       # Persistent conversation tracking
 │   └── types/               # TypeScript definitions
 ├── config/
 │   ├── profile.yaml         # Your job preferences (private)
@@ -160,6 +169,24 @@ linky/
 
 ## 🔍 Advanced Features
 
+### 🧠 ADK Strategic Conversation Management
+Powered by Google AI Developer Kit patterns for intelligent conversation optimization:
+
+**Multi-Step Strategic Analysis**:
+- Analyzes recruiter communication style and behavior patterns
+- Identifies conversation phase (initial, information gathering, evaluation, decision)
+- Plans optimal question sequencing for maximum information extraction
+
+**Goal-Oriented Response Planning**:
+- Prioritizes salary and remote work information extraction
+- Maintains conversation control through strategic deflection
+- Optimizes for negotiation positioning
+
+**Conversation State Management**:
+- Persistent conversation history across sessions
+- Context-aware follow-up responses
+- Adaptive communication based on recruiter behavior
+
 ### AI Disclosure
 Configure transparent AI assistance disclosure:
 ```yaml
@@ -168,15 +195,15 @@ ai_disclosure:
   message: "✨ AI-assisted response"
 ```
 
-### Conversation State Tracking
-- Maintains context across multiple message exchanges
-- Supports follow-up questions and clarifications
-- Tracks job fit analysis and decision making
+### Phone Call Management
+- Automatically deflects phone call requests to LinkedIn messaging
+- Maintains professional boundaries while gathering information
+- Strategic positioning for written communication advantages
 
-### Salary Strategy
+### Salary Negotiation Strategy
 - Strategically extracts recruiter's budget without revealing yours
-- Uses collected information for fit analysis
-- Maintains professional discretion
+- Uses collected information for fit analysis and decision making
+- Maintains professional discretion throughout the process
 
 ## 📊 Monitoring & Debugging
 

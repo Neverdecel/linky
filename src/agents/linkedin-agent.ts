@@ -24,6 +24,9 @@ export class LinkedInAgent {
     this.geminiClient = new GeminiClient(config.gemini.apiKey);
     this.screenshotManager = new ScreenshotManager();
     this.responseTracker = new ResponseTracker();
+    
+    // Set the response tracker on the Gemini client for history-aware classification
+    this.geminiClient.setResponseTracker(this.responseTracker);
   }
 
   async initialize(): Promise<void> {
@@ -636,6 +639,41 @@ export class LinkedInAgent {
           // Get or create conversation history
           const yamlConfig = this.geminiClient['yamlConfig']; // Access private property
           let conversationHistory = yamlConfig.getConversationHistory(conversationId);
+          
+          // If no conversation history exists but we have response history, reconstruct it
+          if (!conversationHistory) {
+            const responseHistory = await this.responseTracker.getResponseHistory();
+            const previousResponse = responseHistory.find(r => r.conversationId === conversationId);
+            
+            if (previousResponse) {
+              // Reconstruct conversation history from response tracker
+              yamlConfig.updateConversationHistory(conversationId, {
+                sender: 'recruiter',
+                content: previousResponse.messageContent,
+                timestamp: new Date(previousResponse.respondedAt.getTime() - 1000) // 1 second before our response
+              });
+              
+              yamlConfig.updateConversationHistory(conversationId, {
+                sender: 'user',
+                content: previousResponse.generatedResponse,
+                timestamp: previousResponse.respondedAt
+              });
+              
+              // Update the phase to follow_up since this is a continuation
+              const history = yamlConfig.getConversationHistory(conversationId);
+              if (history) {
+                history.currentPhase = 'follow_up';
+              }
+              
+              logger.debug('Reconstructed conversation history from response tracker', {
+                conversationId,
+                messageCount: history?.messages.length,
+                phase: history?.currentPhase
+              });
+            }
+          }
+          
+          conversationHistory = yamlConfig.getConversationHistory(conversationId);
           
           // Add the recruiter's message to conversation history
           const recruiterMessage: ConversationMessage = {

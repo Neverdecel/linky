@@ -2,12 +2,16 @@ import { GoogleGenerativeAI, GenerativeModel, HarmCategory, HarmBlockThreshold }
 import { LinkedInMessage } from '../types';
 import { config } from '../utils/config';
 import { YamlConfig, ConversationHistory, FitAnalysis, PersonalPriorities } from '../utils/yaml-config';
+import { ResponseTracker } from '../utils/response-tracker';
+import { ConversationStrategyAgent } from './conversation-strategy-agent';
 import logger from '../utils/logger';
 
 export class GeminiClient {
   private genAI: GoogleGenerativeAI;
   private model: GenerativeModel;
   private yamlConfig: YamlConfig;
+  private responseTracker?: ResponseTracker;
+  private strategyAgent: ConversationStrategyAgent;
 
   constructor(apiKey: string) {
     this.genAI = new GoogleGenerativeAI(apiKey);
@@ -34,6 +38,11 @@ export class GeminiClient {
     });
     this.yamlConfig = new YamlConfig();
     this.yamlConfig.setGeminiClient(this);
+    this.strategyAgent = new ConversationStrategyAgent(apiKey);
+  }
+
+  public setResponseTracker(responseTracker: ResponseTracker): void {
+    this.responseTracker = responseTracker;
   }
 
   // Basic input sanitization to prevent obvious prompt injection attempts
@@ -68,6 +77,31 @@ export class GeminiClient {
   }
 
   async classifyMessage(message: LinkedInMessage): Promise<string> {
+    // Check if we've previously responded to this person as a recruiter
+    if (this.responseTracker) {
+      const conversationId = `linkedin-${message.senderName.toLowerCase().replace(/\s+/g, '-')}`;
+      const hasResponded = await this.responseTracker.hasResponded(conversationId);
+      
+      if (hasResponded) {
+        // If we've previously responded to them, they were likely a recruiter
+        // Check the response history to see what type of recruiter they were
+        const history = await this.responseTracker.getResponseHistory();
+        const previousResponse = history.find(r => r.conversationId === conversationId);
+        
+        if (previousResponse) {
+          // Default to EXTERNAL_RECRUITER for follow-up messages from known recruiters
+          const recruiterType = 'EXTERNAL_RECRUITER';
+          logger.debug('Message classified based on history', { 
+            messageId: message.id,
+            senderName: message.senderName,
+            classification: recruiterType,
+            previouslyRespondedAt: previousResponse.respondedAt
+          });
+          return recruiterType;
+        }
+      }
+    }
+
     const prompt = this.yamlConfig.buildClassificationPrompt(message.content, message.senderName);
     
     try {
@@ -334,29 +368,63 @@ Be specific and reference actual details from the conversation.`;
   async generateFollowUpResponse(conversationHistory: ConversationHistory, fitAnalysis: FitAnalysis): Promise<string> {
     const profile = this.yamlConfig.getProfile();
     
-    const prompt = `Generate a follow-up response based on the conversation and fit analysis.
+    // Get the latest recruiter message to respond to contextually
+    const latestRecruiterMessage = conversationHistory.messages
+      .filter(m => m.sender === 'recruiter')
+      .pop();
+    
+    if (!latestRecruiterMessage) {
+      throw new Error('No recruiter message found in conversation history');
+    }
+
+    // Use strategy agent to analyze conversation and plan response
+    const strategy = await this.strategyAgent.analyzeConversationState(
+      conversationHistory,
+      latestRecruiterMessage,
+      profile
+    );
+    
+    logger.debug('Strategic analysis completed', {
+      phase: strategy.conversationPhase,
+      topGoal: strategy.currentGoals[0]?.type,
+      recruiterStyle: strategy.recruiterProfile.style
+    });
+    
+    const prompt = `Generate a contextual follow-up response to the recruiter's latest message.
 
 PERSON'S PROFILE:
 Name: ${profile.personal.name}
 Current Role: ${profile.personal.current_role}
 Key Requirements: ${profile.requirements.must_have.join(', ')}
 
-CONVERSATION SO FAR:
+CONVERSATION CONTEXT:
 ${conversationHistory.messages.map(m => `${m.sender}: ${m.content}`).join('\n\n')}
+
+RECRUITER'S LATEST MESSAGE TO RESPOND TO:
+"${latestRecruiterMessage?.content || 'No message'}"
 
 FIT ANALYSIS:
 Score: ${fitAnalysis.overallScore}/100
-Positives: ${fitAnalysis.positives.join(', ')}
+Recommendation: ${fitAnalysis.recommendation}
 Concerns: ${fitAnalysis.concerns.join(', ')}
 Missing Info: ${fitAnalysis.missingInfo.join(', ')}
-Recommendation: ${fitAnalysis.recommendation}
 
-Generate an appropriate follow-up response that:
-- If INTERESTED (score 70+): Express genuine interest and ask about next steps
-- If EXPLORING (score 40-69): Ask for clarification on concerns or missing info
-- If DECLINE (score <40): Politely decline with brief reasoning
+RESPONSE GUIDELINES:
+1. FIRST: Directly address what the recruiter just said/asked in their latest message
+2. THEN: Based on fit analysis (${fitAnalysis.recommendation}):
+   - If INTERESTED (score 70+): Express genuine interest and ask strategic questions
+   - If EXPLORING (score 40-69): Ask for more information about concerns/missing details
+   - If DECLINE (score <40): Politely decline with brief reasoning
 
-Keep the tone professional and friendly. Be specific about what you liked or what concerns you have.`;
+CRITICAL CONVERSATION RULES:
+- FIRST: Acknowledge what they just said naturally (vacation, call request, etc.)
+- NEVER give phone number - deflect call requests conversationally 
+- Use phrases like "LinkedIn works great for me" or "Let's continue here"
+- Sound like a human having a conversation, not following a script
+- Keep under 150 words and be genuinely conversational
+- Respond to THEIR specific message, don't just ask standard questions
+
+Generate a natural, human-like follow-up response that actually responds to what they said:`;
 
     try {
       const result = await this.model.generateContent({
@@ -369,12 +437,25 @@ Keep the tone professional and friendly. Be specific about what you liked or wha
       
       const response = result.response.text().trim();
       
-      logger.debug('Follow-up response generated', { 
+      logger.debug('Base follow-up response generated', { 
         recommendation: fitAnalysis.recommendation,
         responseLength: response.length 
       });
 
-      return response;
+      // Use strategy agent to optimize the response
+      const optimizedResponse = await this.strategyAgent.optimizeResponse(
+        response,
+        strategy,
+        conversationHistory
+      );
+
+      logger.debug('Follow-up response optimized', { 
+        originalLength: response.length,
+        optimizedLength: optimizedResponse.length,
+        strategy: strategy.conversationPhase
+      });
+
+      return optimizedResponse;
     } catch (error) {
       logger.error('Failed to generate follow-up response', { error });
       return 'Thank you for the additional information. Let me review this and get back to you.';

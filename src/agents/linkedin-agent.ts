@@ -7,6 +7,8 @@ import { ScreenshotManager } from '../utils/screenshot-manager';
 import { ResponseTracker } from '../utils/response-tracker';
 import { responseLogger } from '../utils/response-logger';
 import { ConversationMessage } from '../utils/yaml-config';
+import { LinkedInSessionManager } from '../utils/linkedin-session-manager';
+import { SessionManager } from '../utils/session-manager';
 import logger from '../utils/logger';
 
 export class LinkedInAgent {
@@ -17,6 +19,7 @@ export class LinkedInAgent {
   private geminiClient: GeminiClient;
   private screenshotManager: ScreenshotManager;
   private responseTracker: ResponseTracker;
+  private sessionManager: LinkedInSessionManager;
   private isLoggedIn: boolean = false;
 
   constructor() {
@@ -24,6 +27,7 @@ export class LinkedInAgent {
     this.geminiClient = new GeminiClient(config.gemini.apiKey);
     this.screenshotManager = new ScreenshotManager();
     this.responseTracker = new ResponseTracker();
+    this.sessionManager = new LinkedInSessionManager(SessionManager.getSessionId());
     
     // Set the response tracker on the Gemini client for history-aware classification
     this.geminiClient.setResponseTracker(this.responseTracker);
@@ -67,8 +71,8 @@ export class LinkedInAgent {
         viewport: { width: 1366, height: 768 }, // Common laptop resolution
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         locale: 'en-US,en;q=0.9,nl;q=0.8', // Multi-language to match your profile
-        timezoneId: 'Europe/Amsterdam', // Your timezone
-        geolocation: { latitude: 52.3676, longitude: 4.9041 }, // Amsterdam coordinates
+        timezoneId: 'Europe/Amsterdam', // Configure your timezone
+        geolocation: { latitude: 52.3676, longitude: 4.9041 }, // Configure your coordinates
         permissions: ['geolocation'],
         extraHTTPHeaders: {
           'Accept-Language': 'en-US,en;q=0.9,nl;q=0.8',
@@ -106,6 +110,20 @@ export class LinkedInAgent {
         Object.defineProperty(screen, 'height', { get: () => 768 });
       `);
 
+      // Try to load saved LinkedIn session
+      const sessionLoaded = await this.sessionManager.loadSession(this.context);
+      if (sessionLoaded) {
+        // Test if the loaded session is still valid
+        const sessionValid = await this.sessionManager.testSession(this.context);
+        if (sessionValid) {
+          logger.info('Using existing LinkedIn session - login not required');
+          this.isLoggedIn = true;
+        } else {
+          logger.info('Saved session is invalid - will need to login');
+          this.sessionManager.clearSession();
+        }
+      }
+
       this.page = await this.context.newPage();
 
       logger.info('LinkedIn agent initialized successfully');
@@ -118,6 +136,12 @@ export class LinkedInAgent {
   async login(): Promise<void> {
     if (!this.page) {
       throw new Error('Page not initialized');
+    }
+
+    // Skip login if we already have a valid session
+    if (this.isLoggedIn) {
+      logger.info('Already logged in with saved session - skipping login');
+      return;
     }
 
     try {
@@ -232,12 +256,24 @@ export class LinkedInAgent {
       // Just wait a moment for initial page load
       await this.page.waitForTimeout(3000);
 
+      // Check for captcha/challenge before checking login status
+      await this.checkForChallenges();
+      
       // Check if we're logged in
       const isLoggedIn = await this.checkLoginStatus();
       
       if (isLoggedIn) {
         this.isLoggedIn = true;
         logger.info('Successfully logged into LinkedIn');
+        
+        // Save the session for future use
+        try {
+          await this.sessionManager.saveSession(this.context!);
+          logger.info('LinkedIn session saved for future use');
+        } catch (error) {
+          logger.warn('Failed to save LinkedIn session', { error });
+        }
+        
         await this.screenshotManager.capture(this.page, 'logged-in');
       } else {
         // Check for 2FA
@@ -305,6 +341,106 @@ export class LinkedInAgent {
       logger.error('Error checking login status', { error });
       return false;
     }
+  }
+
+  async checkForChallenges(): Promise<void> {
+    if (!this.page) {
+      return;
+    }
+
+    try {
+      const url = this.page.url();
+      
+      // Check for various challenge/captcha indicators
+      const challengeIndicators = [
+        // URL patterns
+        url.includes('/checkpoint/challenge'),
+        url.includes('/challenge/'),
+        url.includes('/captcha'),
+        url.includes('/verify'),
+        url.includes('/security'),
+        
+        // Page content indicators
+        await this.page.locator('text=complete this security check').isVisible().catch(() => false),
+        await this.page.locator('text=verify your identity').isVisible().catch(() => false),
+        await this.page.locator('text=solve this puzzle').isVisible().catch(() => false),
+        await this.page.locator('text=are you a robot').isVisible().catch(() => false),
+        await this.page.locator('text=security challenge').isVisible().catch(() => false),
+        await this.page.locator('text=please complete').isVisible().catch(() => false),
+        
+        // Common challenge selectors
+        await this.page.locator('iframe[src*="captcha"]').isVisible().catch(() => false),
+        await this.page.locator('div[class*="captcha"]').isVisible().catch(() => false),
+        await this.page.locator('div[class*="challenge"]').isVisible().catch(() => false),
+        await this.page.locator('input[name="captcha"]').isVisible().catch(() => false),
+        await this.page.locator('[data-test="challenge"]').isVisible().catch(() => false)
+      ];
+
+      const hasChallengeIndicator = challengeIndicators.some(indicator => indicator);
+
+      if (hasChallengeIndicator) {
+        logger.warn('🚨 Challenge/Captcha detected! Pausing for manual intervention...');
+        await this.screenshotManager.capture(this.page, 'challenge-detected');
+        
+        logger.info('📋 Challenge Detection Details:');
+        logger.info(`   URL: ${url}`);
+        logger.info(`   Please complete the challenge manually in the browser window.`);
+        logger.info(`   The automation will wait for you to complete it.`);
+        logger.info(`   Press Ctrl+C to stop if needed.`);
+        
+        // Wait for the challenge to be resolved
+        await this.waitForChallengeResolution();
+      }
+    } catch (error) {
+      logger.error('Error checking for challenges', { error });
+    }
+  }
+
+  async waitForChallengeResolution(): Promise<void> {
+    if (!this.page) {
+      return;
+    }
+
+    const maxWaitTime = 5 * 60 * 1000; // 5 minutes max wait
+    const checkInterval = 5000; // Check every 5 seconds
+    const startTime = Date.now();
+
+    logger.info('⏳ Waiting for challenge resolution...');
+
+    while (Date.now() - startTime < maxWaitTime) {
+      try {
+        const url = this.page.url();
+        
+        // Check if we're still on a challenge page
+        const stillOnChallenge = 
+          url.includes('/checkpoint/challenge') ||
+          url.includes('/challenge/') ||
+          url.includes('/captcha') ||
+          url.includes('/verify') ||
+          await this.page.locator('text=complete this security check').isVisible().catch(() => false) ||
+          await this.page.locator('text=solve this puzzle').isVisible().catch(() => false);
+
+        if (!stillOnChallenge) {
+          logger.info('✅ Challenge appears to be resolved! Continuing...');
+          await this.screenshotManager.capture(this.page, 'challenge-resolved');
+          return;
+        }
+
+        // Show progress indicator
+        const elapsed = Math.round((Date.now() - startTime) / 1000);
+        const remaining = Math.round((maxWaitTime - (Date.now() - startTime)) / 1000);
+        logger.info(`⏳ Still waiting... (${elapsed}s elapsed, ${remaining}s remaining)`);
+
+        await this.page.waitForTimeout(checkInterval);
+      } catch (error) {
+        logger.error('Error while waiting for challenge resolution', { error });
+        break;
+      }
+    }
+
+    // If we get here, the timeout was reached
+    logger.warn('⚠️ Challenge resolution timeout reached. You may need to complete it manually.');
+    throw new Error('Challenge resolution timeout - manual intervention may be required');
   }
 
   async navigateToMessages(): Promise<void> {
@@ -587,63 +723,206 @@ export class LinkedInAgent {
         throw new Error('Page not available');
       }
 
-      // Try to find and click the conversation thread
-      const conversationSelector = `[data-control-name="conversation_item_${senderName.toLowerCase().replace(/\s+/g, '_')}"], 
-                                   .msg-conversation-listitem:has-text("${senderName}")`;
-      
       logger.debug('Attempting to extract full conversation', { 
         conversationId, 
         senderName 
       });
 
-      // Click on the conversation to open it
-      try {
-        await this.page.click(conversationSelector, { timeout: 5000 });
-        await this.page.waitForTimeout(2000); // Wait for conversation to load
-      } catch (error) {
-        logger.warn('Could not click specific conversation, using current conversation', { 
-          senderName, 
-          error: error instanceof Error ? error.message : String(error)
-        });
+      // First, try to find and click the specific conversation thread
+      let conversationOpened = false;
+      
+      // Multiple strategies to find the conversation
+      const conversationSelectors = [
+        // Generic conversation items (we'll verify sender name after clicking)
+        '.msg-conversation-listitem'
+      ];
+      
+      for (const selector of conversationSelectors) {
+        try {
+          const conversationElements = await this.page.$$(selector);
+          
+          for (const element of conversationElements) {
+            try {
+              // Check if this conversation matches our sender
+              const participantName = await element.$eval(
+                '.msg-conversation-listitem__participant-names .truncate',
+                el => el.textContent?.trim() || ''
+              ).catch(() => '');
+              
+              if (participantName.toLowerCase().includes(senderName.toLowerCase()) || 
+                  senderName.toLowerCase().includes(participantName.toLowerCase())) {
+                
+                logger.debug('Found matching conversation, clicking to open', { 
+                  participantName, 
+                  senderName 
+                });
+                
+                await element.click();
+                await this.page.waitForTimeout(3000); // Wait longer for conversation to load
+                conversationOpened = true;
+                break;
+              }
+            } catch (error) {
+              logger.debug('Error checking conversation participant', { error: error instanceof Error ? error.message : String(error) });
+              continue;
+            }
+          }
+          
+          if (conversationOpened) break;
+        } catch (error) {
+          logger.debug(`Conversation selector ${selector} failed`, { error: error instanceof Error ? error.message : String(error) });
+          continue;
+        }
       }
 
-      // Extract all messages from the conversation thread
-      const messageElements = await this.page.$$('.msg-s-message-list__event');
+      if (!conversationOpened) {
+        logger.warn('Could not open specific conversation, trying to extract from current view', { senderName });
+      }
+
+      // Wait for message content to load
+      await this.page.waitForTimeout(2000);
+
+      // Try multiple selectors for the message container
+      const messageListSelectors = [
+        '.msg-s-message-list-container',
+        '.msg-s-message-list',
+        '.msg-s-message-list__event', // Original selector
+        '.msg-conversation-card__content', // Alternative
+        '[role="log"]', // ARIA role for message lists
+        '.msg-s-message-group' // Message groups
+      ];
+
+      let messageElements: any[] = [];
+      for (const selector of messageListSelectors) {
+        try {
+          const elements = await this.page.$$(selector);
+          if (elements.length > 0) {
+            messageElements = elements;
+            logger.debug(`Found ${elements.length} message elements using selector: ${selector}`);
+            break;
+          }
+        } catch (error) {
+          continue;
+        }
+      }
+
+      if (messageElements.length === 0) {
+        logger.warn('No message elements found with any selector, taking screenshot for debugging');
+        await this.screenshotManager.capture(this.page, `conversation-extraction-failed-${senderName.replace(/\s+/g, '-')}`);
+        
+        // Try a more generic approach - look for any text content in the conversation area
+        const conversationArea = await this.page.$('.msg-s-message-list-container, .msg-conversation-card__content');
+        if (conversationArea) {
+          const allText = await conversationArea.textContent();
+          logger.debug('Raw conversation area text (first 500 chars)', { 
+            text: allText?.substring(0, 500) || 'No text found'
+          });
+        }
+        
+        return messages;
+      }
       
+      // Extract messages from elements
       for (const messageElement of messageElements) {
         try {
-          // Check if this is a message (not other events like connection requests)
-          const isMessage = await messageElement.$('.msg-s-event-listitem__body') !== null;
-          if (!isMessage) continue;
-
-          // Extract sender information
-          const senderElement = await messageElement.$('.msg-s-message-group__name');
-          const messageSender = senderElement 
-            ? await senderElement.textContent() 
-            : 'Unknown';
-
-          // Determine if it's from us or the recruiter
-          const isOurMessage = messageSender?.includes('You') || messageSender === 'You';
-          const sender = isOurMessage ? 'user' : 'recruiter';
-
-          // Extract message content
-          const contentElement = await messageElement.$('.msg-s-event-listitem__body .msg-s-event-listitem__content');
-          const content = contentElement 
-            ? (await contentElement.textContent())?.trim() || ''
-            : '';
+          // Try multiple approaches to extract message content
+          let content = '';
+          let sender = 'unknown';
+          
+          // Strategy 1: Look for structured message content
+          const contentSelectors = [
+            '.msg-s-event-listitem__body .msg-s-event-listitem__content',
+            '.msg-s-event-listitem__body',
+            '.msg-s-message-group__content',
+            'p', // Simple paragraph content
+            '.t-14', // LinkedIn's text styling classes
+            '.break-words' // LinkedIn's word-wrap classes
+          ];
+          
+          for (const contentSelector of contentSelectors) {
+            try {
+              const contentEl = await messageElement.$(contentSelector);
+              if (contentEl) {
+                const textContent = await contentEl.textContent();
+                if (textContent && textContent.trim().length > 0) {
+                  content = textContent.trim();
+                  break;
+                }
+              }
+            } catch (error) {
+              continue;
+            }
+          }
+          
+          // Strategy 2: Determine sender
+          const senderSelectors = [
+            '.msg-s-message-group__name',
+            '.msg-s-event-listitem__message-sender', 
+            '.msg-conversation-listitem__participant-names',
+            '[data-control-name="overlay_message_sender_name"]'
+          ];
+          
+          for (const senderSelector of senderSelectors) {
+            try {
+              const senderEl = await messageElement.$(senderSelector);
+              if (senderEl) {
+                const senderText = await senderEl.textContent();
+                if (senderText && senderText.trim().length > 0) {
+                  sender = senderText.trim();
+                  break;
+                }
+              }
+            } catch (error) {
+              continue;
+            }
+          }
+          
+          // If we can't find structured sender info, infer from position or content
+          if (sender === 'unknown' || sender === '') {
+            // Check if element has classes that indicate it's our message vs theirs
+            const elementClasses = await messageElement.getAttribute('class') || '';
+            if (elementClasses.includes('msg-s-message-group--other') || 
+                elementClasses.includes('msg-s-event-listitem--other')) {
+              sender = 'recruiter';
+            } else if (elementClasses.includes('msg-s-message-group--self') || 
+                       elementClasses.includes('msg-s-event-listitem--self')) {
+              sender = 'user';
+            } else {
+              // Default assumption: if we're extracting from a recruiter's conversation, 
+              // and we can't determine sender, assume it's from the recruiter
+              sender = 'recruiter';
+            }
+          } else {
+            // Classify based on sender name
+            const isOurMessage = sender.toLowerCase().includes('you') || 
+                               sender.toLowerCase().includes('floris') ||
+                               sender === 'You';
+            sender = isOurMessage ? 'user' : 'recruiter';
+          }
 
           if (content && content.length > 0) {
-            // Extract timestamp (simplified - could be enhanced)
-            const timestamp = new Date(); // LinkedIn timestamps are complex, using current time as fallback
-
+            // Skip very short messages that might be system messages
+            if (content.length < 5) {
+              logger.debug('Skipping very short message', { content });
+              continue;
+            }
+            
             messages.push({
-              sender,
+              sender: sender as 'user' | 'recruiter',
               content,
-              timestamp
+              timestamp: new Date() // LinkedIn timestamps are complex, using current time as fallback
+            });
+            
+            logger.debug('Extracted message', { 
+              sender, 
+              contentLength: content.length,
+              preview: content.substring(0, 50) + '...'
             });
           }
         } catch (error) {
-          logger.debug('Failed to extract individual message', { error: error instanceof Error ? error.message : String(error) });
+          logger.debug('Failed to extract individual message', { 
+            error: error instanceof Error ? error.message : String(error) 
+          });
         }
       }
 
@@ -652,13 +931,158 @@ export class LinkedInAgent {
         messageCount: messages.length 
       });
 
+      // If we still have no messages, try a fallback approach
+      if (messages.length === 0) {
+        logger.warn('No messages extracted with primary approach, trying fallback method');
+        await this.screenshotManager.capture(this.page, `no-messages-extracted-${senderName.replace(/\s+/g, '-')}`);
+        
+        // Fallback: Try to extract any text content from the conversation area
+        const fallbackMessages = await this.extractConversationFallback(senderName);
+        messages.push(...fallbackMessages);
+        
+        if (messages.length > 0) {
+          logger.info('Fallback extraction succeeded', { messageCount: messages.length });
+        } else {
+          // Log the page content for debugging
+          const pageContent = await this.page.content();
+          const messageAreaMatch = pageContent.match(/<div[^>]*msg-s-message[^>]*>[\s\S]*?<\/div>/i);
+          if (messageAreaMatch) {
+            logger.debug('Message area HTML for debugging', { 
+              html: messageAreaMatch[0].substring(0, 1000) + '...'
+            });
+          }
+        }
+      }
+
     } catch (error) {
       logger.warn('Failed to extract full conversation from LinkedIn', { 
         conversationId,
         error: error instanceof Error ? error.message : String(error)
       });
+      
+      // Take a screenshot for debugging
+      if (this.page) {
+        await this.screenshotManager.capture(this.page, `conversation-extraction-error-${senderName.replace(/\s+/g, '-')}`);
+      }
     }
 
+    return messages;
+  }
+
+  private async extractConversationFallback(senderName: string): Promise<ConversationMessage[]> {
+    const messages: ConversationMessage[] = [];
+    
+    if (!this.page) {
+      return messages;
+    }
+    
+    try {
+      logger.debug('Attempting fallback conversation extraction', { senderName });
+      
+      // Try to find the conversation content area with broader selectors
+      const conversationAreaSelectors = [
+        '.msg-s-message-list-container',
+        '.msg-conversation-card__content-container',
+        '.conversation-pane',
+        '.msg-s-event-listitem__content',
+        '.msg-overlay-conversation-bubble__content',
+        '[role="main"] .msg-s-message-list'
+      ];
+      
+      let conversationArea = null;
+      for (const selector of conversationAreaSelectors) {
+        conversationArea = await this.page.$(selector);
+        if (conversationArea) {
+          logger.debug('Found conversation area with selector', { selector });
+          break;
+        }
+      }
+      
+      if (!conversationArea) {
+        logger.warn('No conversation area found for fallback extraction');
+        return messages;
+      }
+      
+      // Extract all text content and try to parse it
+      const allText = await conversationArea.textContent();
+      if (!allText || allText.trim().length === 0) {
+        logger.warn('No text content found in conversation area');
+        return messages;
+      }
+      
+      // Try to find message patterns in the text
+      // LinkedIn often has patterns like "SenderName\nMessage content\nTimestamp"
+      const lines = allText.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+      
+      let currentMessage = '';
+      let currentSender = 'recruiter'; // Default assumption
+      
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        
+        // Skip very short lines (likely UI elements)
+        if (line.length < 3) continue;
+        
+        // Check if this line might be a sender name
+        if (line.includes('You') || line.toLowerCase().includes('floris')) {
+          currentSender = 'user';
+          continue;
+        } else if (line.toLowerCase().includes(senderName.toLowerCase()) || 
+                   senderName.toLowerCase().includes(line.toLowerCase())) {
+          currentSender = 'recruiter';
+          continue;
+        }
+        
+        // Check if this looks like a timestamp (skip it)
+        if (line.match(/^\d{1,2}:\d{2}/) || line.match(/^\w{3}\s+\d{1,2}/) || 
+            line.includes('min ago') || line.includes('hour ago') || line.includes('day ago')) {
+          continue;
+        }
+        
+        // Check if this line looks like a message (substantial content)
+        if (line.length > 10 && !line.match(/^[A-Z\s]+$/) && // Not all caps
+            !line.includes('•') && // Not bullet points
+            !line.includes('LinkedIn') && // Not UI text
+            !line.includes('Message') && // Not UI text
+            !line.includes('Send') && // Not UI text
+            line.includes(' ')) { // Has spaces (likely sentence)
+          
+          if (currentMessage.length > 0) {
+            // Save the previous message
+            messages.push({
+              sender: currentSender as 'user' | 'recruiter',
+              content: currentMessage,
+              timestamp: new Date()
+            });
+          }
+          
+          currentMessage = line;
+        } else if (currentMessage.length > 0 && line.length > 5) {
+          // Might be a continuation of the current message
+          currentMessage += ' ' + line;
+        }
+      }
+      
+      // Don't forget the last message
+      if (currentMessage.length > 0) {
+        messages.push({
+          sender: currentSender as 'user' | 'recruiter',
+          content: currentMessage,
+          timestamp: new Date()
+        });
+      }
+      
+      logger.debug('Fallback extraction completed', { 
+        messagesFound: messages.length,
+        textLength: allText.length 
+      });
+      
+    } catch (error) {
+      logger.warn('Fallback conversation extraction failed', { 
+        error: error instanceof Error ? error.message : String(error) 
+      });
+    }
+    
     return messages;
   }
 
@@ -812,11 +1236,39 @@ export class LinkedInAgent {
           
           conversationHistory = yamlConfig.getConversationHistory(conversationId);
           
-          // Generate response using the new conversational system
+          // Re-classify message with full conversation context (ADK best practice)
+          if (conversationHistory && conversationHistory.messages.length > 0) {
+            logger.debug('Re-classifying message with conversation context', {
+              conversationId,
+              messageCount: conversationHistory.messages.length
+            });
+            
+            const updatedClassification = await this.geminiClient.classifyMessage(
+              message, 
+              conversationHistory.messages
+            );
+            
+            if (updatedClassification !== message.messageClassification) {
+              logger.info('🔄 Classification updated with conversation context', {
+                senderName: message.senderName,
+                original: message.messageClassification,
+                updated: updatedClassification
+              });
+              message.messageClassification = updatedClassification;
+            }
+          }
+          
+          // CRITICAL: Detect language BEFORE generating response (ADK best practice)
+          logger.info('🔍 Detecting message language for appropriate response generation');
+          const detectedLanguage = await this.geminiClient.detectLanguage(message.content);
+          logger.info(`📝 Language detected: ${detectedLanguage}`);
+          
+          // Generate response using the new conversational system with language context
           const response = await this.geminiClient.generateResponse(
             message, 
             message.messageClassification || 'EXTERNAL_RECRUITER',
-            conversationHistory
+            conversationHistory,
+            detectedLanguage
           );
           
           // Add our response to conversation history (avoid duplicates)
@@ -828,12 +1280,11 @@ export class LinkedInAgent {
           
           yamlConfig.updateConversationHistory(conversationId, userMessage);
           
-          logger.info(`\n🤖 Generated ${conversationHistory?.currentPhase} response:`);
+          logger.info(`\n🤖 Generated ${conversationHistory?.currentPhase} response (${detectedLanguage}):`);
           logger.info(`"${response}"`);
           logger.info(`\n📝 Response saved but NOT sent (safe mode)`);
           
-          // Detect language using AI and log the response for fine-tuning
-          const detectedLanguage = await this.geminiClient.detectLanguage(message.content);
+          // Log the response for fine-tuning (language already detected)
           responseLogger.logResponse(
             message.senderName,
             message.content,

@@ -75,6 +75,7 @@ pids
 
 # Claude Code files
 .claude
+CLAUDE.md
 
 # Development/writing files
 medium-article.md

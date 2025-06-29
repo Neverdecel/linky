@@ -1,44 +1,86 @@
-import { GoogleGenerativeAI, GenerativeModel, HarmCategory, HarmBlockThreshold } from '@google/generative-ai';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import { LinkedInMessage } from '../types';
-import { config } from '../utils/config';
-import { YamlConfig, ConversationHistory, FitAnalysis, PersonalPriorities } from '../utils/yaml-config';
+import { YamlConfig, ConversationHistory, ConversationMessage, FitAnalysis, PersonalPriorities } from '../utils/yaml-config';
 import { ResponseTracker } from '../utils/response-tracker';
 import { ConversationStrategyAgent } from './conversation-strategy-agent';
+import { LanguageDetectionAgent } from './language-detection-agent';
+import * as yaml from 'js-yaml';
+import * as fs from 'fs';
+import * as path from 'path';
 import logger from '../utils/logger';
+
+// Simple AI configuration
+interface AIConfig {
+  models: {
+    classification: { primary: string; fallback: string; temperature: number; max_tokens: number };
+    response_generation: { primary: string; fallback: string; temperature: number; max_tokens: number };
+    analysis: { primary: string; fallback: string; temperature: number; max_tokens: number };
+  };
+  safety: {
+    input_sanitization: { enabled: boolean; filters: Array<{ pattern: string; replacement: string }> };
+    output_validation: { enabled: boolean; rules: any };
+  };
+  quality: {
+    min_confidence_score: number;
+    regenerate_on_low_quality: boolean;
+    max_regeneration_attempts: number;
+  };
+  prompts: {
+    classification_template: string;
+    response_quality_check: string;
+  };
+}
 
 export class GeminiClient {
   private genAI: GoogleGenerativeAI;
-  private model: GenerativeModel;
   private yamlConfig: YamlConfig;
   private responseTracker?: ResponseTracker;
   private strategyAgent: ConversationStrategyAgent;
+  private languageDetectionAgent: LanguageDetectionAgent;
+  private aiConfig: AIConfig;
 
   constructor(apiKey: string) {
     this.genAI = new GoogleGenerativeAI(apiKey);
-    this.model = this.genAI.getGenerativeModel({ 
-      model: config.gemini.model,
-      safetySettings: [
-        {
-          category: HarmCategory.HARM_CATEGORY_HARASSMENT,
-          threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-        },
-        {
-          category: HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-          threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-        },
-        {
-          category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-          threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-        },
-        {
-          category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-          threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
-        },
-      ],
-    });
     this.yamlConfig = new YamlConfig();
     this.yamlConfig.setGeminiClient(this);
     this.strategyAgent = new ConversationStrategyAgent(apiKey);
+    this.languageDetectionAgent = new LanguageDetectionAgent(apiKey);
+    
+    // Load simplified AI configuration
+    this.aiConfig = this.loadAIConfig();
+    
+    logger.info('GeminiClient initialized with ADK tool specialization pattern including LanguageDetectionAgent');
+  }
+  
+  private loadAIConfig(): AIConfig {
+    try {
+      const configPath = path.join(__dirname, '../../config/ai-config.yaml');
+      const fileContent = fs.readFileSync(configPath, 'utf8');
+      return yaml.load(fileContent) as AIConfig;
+    } catch (error) {
+      logger.error('Failed to load AI config, using defaults', { error });
+      // Return sensible defaults
+      return {
+        models: {
+          classification: { primary: 'gemini-2.5-flash', fallback: 'gemini-1.5-flash', temperature: 0.1, max_tokens: 500 },
+          response_generation: { primary: 'gemini-2.5-pro', fallback: 'gemini-2.5-flash', temperature: 0.7, max_tokens: 800 },
+          analysis: { primary: 'gemini-2.5-flash', fallback: 'gemini-1.5-flash', temperature: 0.3, max_tokens: 2000 }
+        },
+        safety: {
+          input_sanitization: { enabled: true, filters: [] },
+          output_validation: { enabled: true, rules: {} }
+        },
+        quality: {
+          min_confidence_score: 0.6,
+          regenerate_on_low_quality: true,
+          max_regeneration_attempts: 1
+        },
+        prompts: {
+          classification_template: 'Classify this message as INTERNAL_RECRUITER, EXTERNAL_RECRUITER, or OTHER',
+          response_quality_check: 'Check if this response is appropriate'
+        }
+      };
+    }
   }
 
   public setResponseTracker(responseTracker: ResponseTracker): void {
@@ -46,135 +88,326 @@ export class GeminiClient {
   }
 
   async detectLanguage(text: string): Promise<string> {
-    const prompt = `Detect the primary language of this text. Respond with only the ISO 639-1 language code (e.g., "en" for English, "nl" for Dutch, "de" for German, etc.).
-
-Text: "${this.sanitizeInput(text)}"`;
-    
     try {
-      const result = await this.model.generateContent({
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        generationConfig: {
-          temperature: 0.1,
-          maxOutputTokens: 5,
-        },
+      // ADK Hierarchical Delegation: delegate to specialized language detection agent
+      const result = await this.languageDetectionAgent.detectLanguage(text);
+      
+      logger.debug('Language detected via specialized agent', { 
+        language: result.language, 
+        confidence: result.confidence,
+        isReliable: result.isReliable,
+        textLength: text.length 
       });
       
-      const language = result.response.text().trim().toLowerCase();
-      logger.debug('Language detected', { language, textLength: text.length });
-      return language;
+      return result.language;
     } catch (error) {
-      logger.error('Failed to detect language', { error });
-      return 'auto'; // Fallback
+      logger.error('Language detection via specialized agent failed', { error });
+      return 'auto';
     }
   }
 
-  // Basic input sanitization to prevent obvious prompt injection attempts
+  // Simplified input sanitization
   private sanitizeInput(content: string): string {
-    return content
-      .replace(/\/system|IGNORE PREVIOUS|FORGET EVERYTHING|ACT AS|YOU ARE NOW/gi, '[FILTERED]')
-      .replace(/\[INST\]|\[\/INST\]/gi, '[FILTERED]')
-      .trim();
-  }
-
-
-  // Add AI disclosure to response if enabled
-  private async addAIDisclosure(response: string, messageContent: string): Promise<string> {
-    const profile = this.yamlConfig.getProfile();
-    
-    if (!profile.ai_disclosure?.enabled) {
-      return response;
+    if (!this.aiConfig.safety.input_sanitization.enabled) {
+      return content;
     }
-
-    const language = await this.detectLanguage(messageContent);
-    const disclosure = language === 'nl' 
-      ? "✨ AI-ondersteunde reactie"
-      : profile.ai_disclosure.message;
-
-    return `${response}\n\n${disclosure}`;
+    
+    let sanitized = content;
+    for (const filter of this.aiConfig.safety.input_sanitization.filters) {
+      sanitized = sanitized.replace(new RegExp(filter.pattern, 'gi'), filter.replacement);
+    }
+    return sanitized.trim();
   }
 
-  async classifyMessage(message: LinkedInMessage): Promise<string> {
-    // Check if we've previously responded to this person as a recruiter
+  // ADK Best Practice: Extract full conversation context for better classification
+  private async extractConversationContext(message: LinkedInMessage): Promise<string> {
+    try {
+      // Return the full message content as context for now
+      // This will be enhanced when we integrate with LinkedInAgent's conversation extraction
+      const content = message.content.trim();
+      
+      // For better classification, we provide the full message content
+      // plus any additional context we can derive
+      const contextParts = [];
+      
+      // Add the sender information
+      contextParts.push(`Sender: ${message.senderName}`);
+      
+      // Add sender title/company if available
+      if (message.senderTitle) {
+        contextParts.push(`Title: ${message.senderTitle}`);
+      }
+      if (message.senderCompany) {
+        contextParts.push(`Company: ${message.senderCompany}`);
+      }
+      
+      // Add the full message content
+      contextParts.push(`Message: ${content}`);
+      
+      // Note: In a full implementation, this would extract the conversation thread
+      // from LinkedIn using the LinkedInAgent's conversation extraction methods
+      // For now, we're using the single message as context
+      
+      const fullContext = contextParts.join('\n');
+      
+      logger.debug('Full conversation context extracted', {
+        senderName: message.senderName,
+        contextLength: fullContext.length,
+        hasSenderInfo: !!(message.senderTitle || message.senderCompany)
+      });
+      
+      return fullContext;
+    } catch (error) {
+      logger.error('Failed to extract conversation context', { error });
+      return `Sender: ${message.senderName}\nMessage: ${message.content}`;
+    }
+  }
+
+  async classifyMessage(message: LinkedInMessage, conversationHistory?: ConversationMessage[]): Promise<string> {
+    // Check historical data first
     if (this.responseTracker) {
       const conversationId = `linkedin-${message.senderName.toLowerCase().replace(/\s+/g, '-')}`;
       const hasResponded = await this.responseTracker.hasResponded(conversationId);
       
       if (hasResponded) {
-        // If we've previously responded to them, they were likely a recruiter
-        // Check the response history to see what type of recruiter they were
         const history = await this.responseTracker.getResponseHistory();
         const previousResponse = history.find(r => r.conversationId === conversationId);
         
         if (previousResponse) {
-          // Default to EXTERNAL_RECRUITER for follow-up messages from known recruiters
           const recruiterType = 'EXTERNAL_RECRUITER';
           logger.debug('Message classified based on history', { 
             messageId: message.id,
             senderName: message.senderName,
-            classification: recruiterType,
-            previouslyRespondedAt: previousResponse.respondedAt
+            classification: recruiterType
           });
           return recruiterType;
         }
       }
     }
 
-    const prompt = this.yamlConfig.buildClassificationPrompt(message.content, message.senderName);
+    // ADK Best Practice: Use full conversation context for better classification
+    let conversationContext: string;
+    
+    if (conversationHistory && conversationHistory.length > 0) {
+      // Use the actual conversation history from LinkedIn
+      const contextParts = [];
+      contextParts.push(`Sender: ${message.senderName}`);
+      if (message.senderTitle) contextParts.push(`Title: ${message.senderTitle}`);
+      if (message.senderCompany) contextParts.push(`Company: ${message.senderCompany}`);
+      
+      contextParts.push('\nConversation History:');
+      // Use the first 2-3 messages for context (most recent exchanges)
+      const recentMessages = conversationHistory.slice(-3);
+      for (const msg of recentMessages) {
+        contextParts.push(`${msg.sender}: ${msg.content}`);
+      }
+      
+      conversationContext = contextParts.join('\n');
+      
+      logger.debug('Using conversation history for classification', {
+        senderName: message.senderName,
+        messageCount: recentMessages.length,
+        contextLength: conversationContext.length
+      });
+    } else {
+      // Fallback to single message context
+      conversationContext = await this.extractConversationContext(message);
+    }
+    const sanitizedContent = this.sanitizeInput(message.content);
+    
+    const prompt = this.aiConfig.prompts.classification_template
+      .replace('{content}', sanitizedContent)
+      .replace('{sender_name}', message.senderName)
+      .replace('{conversation_context}', conversationContext);
     
     try {
-      const result = await this.model.generateContent({
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      const modelConfig = this.aiConfig.models.classification;
+      const model = this.genAI.getGenerativeModel({ 
+        model: modelConfig.primary,
         generationConfig: {
-          temperature: 0.1, // Low temperature for consistent classification
-          maxOutputTokens: 10,
-        },
+          temperature: modelConfig.temperature,
+          maxOutputTokens: modelConfig.max_tokens,
+          responseMimeType: "application/json"
+        }
       });
       
-      const classification = result.response.text().trim().toUpperCase();
-      logger.debug('Message classified', { 
+      const result = await model.generateContent(prompt);
+      const response = result.response.text();
+      
+      let parsed: any;
+      try {
+        // Clean up response - remove markdown code blocks if present
+        let cleanResponse = response.trim();
+        if (cleanResponse.startsWith('```json')) {
+          cleanResponse = cleanResponse.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+        } else if (cleanResponse.startsWith('```')) {
+          cleanResponse = cleanResponse.replace(/^```\s*/, '').replace(/\s*```$/, '');
+        }
+        
+        // Handle empty responses
+        if (!cleanResponse || cleanResponse.length < 10) {
+          logger.warn('Empty or very short classification response', { response });
+          return 'OTHER';
+        }
+        
+        parsed = JSON.parse(cleanResponse);
+      } catch (parseError) {
+        logger.error('Failed to parse classification JSON', { 
+          response: response.substring(0, 200),
+          error: parseError instanceof Error ? parseError.message : String(parseError)
+        });
+        return 'OTHER';
+      }
+      
+      const classification = parsed.classification || 'OTHER';
+      const confidence = parsed.confidence || 0.5;
+      
+      // Check confidence threshold
+      if (confidence < this.aiConfig.quality.min_confidence_score) {
+        logger.warn('Classification confidence below threshold', { 
+          classification, 
+          confidence,
+          threshold: this.aiConfig.quality.min_confidence_score
+        });
+        return 'OTHER';
+      }
+      
+      logger.debug('Message classified', {
         messageId: message.id,
-        senderName: message.senderName,
-        classification 
+        classification,
+        confidence,
+        reasoning: parsed.reasoning
       });
-
+      
       return classification;
     } catch (error) {
-      logger.error('Failed to classify message', { error, messageId: message.id });
-      return 'OTHER'; // Fallback classification
+      logger.error('Classification failed, trying fallback', { error });
+      
+      // Try fallback model
+      try {
+        const modelConfig = this.aiConfig.models.classification;
+        const model = this.genAI.getGenerativeModel({ 
+          model: modelConfig.fallback,
+          generationConfig: {
+            temperature: modelConfig.temperature,
+            maxOutputTokens: modelConfig.max_tokens,
+          }
+        });
+        
+        const result = await model.generateContent(prompt);
+        const response = result.response.text();
+        
+        // Simple pattern matching as last resort
+        if (response.includes('INTERNAL_RECRUITER')) return 'INTERNAL_RECRUITER';
+        if (response.includes('EXTERNAL_RECRUITER')) return 'EXTERNAL_RECRUITER';
+        return 'OTHER';
+      } catch (fallbackError) {
+        logger.error('Fallback classification also failed', { fallbackError });
+        return 'OTHER';
+      }
     }
   }
 
-  async generateResponse(message: LinkedInMessage, recruiterType: string = 'EXTERNAL_RECRUITER', conversationHistory?: ConversationHistory): Promise<string> {
-    // Sanitize input to prevent basic prompt injection attempts
+  async generateResponse(message: LinkedInMessage, recruiterType: string = 'EXTERNAL_RECRUITER', conversationHistory?: ConversationHistory, detectedLanguage?: string): Promise<string> {
     const sanitizedMessage = {
       ...message,
       content: this.sanitizeInput(message.content)
     };
     
-    const prompt = await this.yamlConfig.buildPrompt(sanitizedMessage.content, sanitizedMessage.senderName, recruiterType, conversationHistory);
-    
     try {
-      const result = await this.model.generateContent({
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      // Build prompt using existing YamlConfig with detected language
+      const prompt = await this.yamlConfig.buildPrompt(
+        sanitizedMessage.content, 
+        sanitizedMessage.senderName, 
+        recruiterType, 
+        conversationHistory,
+        detectedLanguage
+      );
+      
+      const modelConfig = this.aiConfig.models.response_generation;
+      const model = this.genAI.getGenerativeModel({ 
+        model: modelConfig.primary,
         generationConfig: {
-          temperature: config.gemini.temperature,
-          maxOutputTokens: 300,
-        },
+          temperature: modelConfig.temperature,
+          maxOutputTokens: modelConfig.max_tokens,
+        }
       });
       
-      const response = result.response.text();
-      logger.debug('Response generated', { 
-        messageId: message.id, 
-        responseLength: response.length 
-      });
-
-      // Add AI disclosure if enabled
-      const finalResponse = await this.addAIDisclosure(response.trim(), message.content);
+      const result = await model.generateContent(prompt);
+      let response = result.response.text().trim();
       
-      return finalResponse;
+      // Validate response quality including language matching
+      if (this.aiConfig.safety.output_validation.enabled) {
+        const isValid = await this.validateResponse(response, message, detectedLanguage);
+        
+        if (!isValid && this.aiConfig.quality.regenerate_on_low_quality) {
+          logger.warn('Response failed validation, regenerating');
+          
+          // Try once more with adjusted temperature
+          const adjustedModel = this.genAI.getGenerativeModel({ 
+            model: modelConfig.primary,
+            generationConfig: {
+              temperature: Math.max(0.3, modelConfig.temperature - 0.2),
+              maxOutputTokens: modelConfig.max_tokens,
+            }
+          });
+          
+          const retryResult = await adjustedModel.generateContent(prompt);
+          response = retryResult.response.text().trim();
+        }
+      }
+      
+      logger.debug('Response generated', {
+        messageId: message.id,
+        responseLength: response.length,
+        recruiterType
+      });
+      
+      return response;
     } catch (error) {
-      logger.error('Failed to generate response', { error, messageId: message.id });
-      throw error;
+      logger.error('Response generation failed', { error, messageId: message.id });
+      
+      // Simple fallback response
+      return "Thank you for reaching out. I'd be happy to learn more about this opportunity. Could you share some details about the role and company?";
+    }
+  }
+
+  private async validateResponse(response: string, originalMessage: LinkedInMessage, expectedLanguage?: string): Promise<boolean> {
+    try {
+      // Enhanced validation prompt that includes language checking
+      const languageCheck = expectedLanguage ? 
+        `\n\nIMPORTANT: Check that the response is written in ${expectedLanguage.toUpperCase()}. If the original message was in Dutch (nl), the response MUST be in Dutch. If English (en), it MUST be in English.` : '';
+      
+      const prompt = `${this.aiConfig.prompts.response_quality_check}
+        
+Response to validate: "${response}"
+Original message language: ${expectedLanguage || 'unknown'}${languageCheck}
+
+Return JSON: {"passed": boolean, "issues": string[], "language_match": boolean}`;
+      
+      const model = this.genAI.getGenerativeModel({ 
+        model: this.aiConfig.models.analysis.primary,
+        generationConfig: {
+          temperature: 0.1,
+          maxOutputTokens: 500,
+          responseMimeType: "application/json"
+        }
+      });
+      
+      const result = await model.generateContent(prompt);
+      const validation = JSON.parse(result.response.text());
+      
+      if (!validation.passed) {
+        logger.warn('Response validation failed', { 
+          issues: validation.issues,
+          messageId: originalMessage.id 
+        });
+      }
+      
+      return validation.passed;
+    } catch (error) {
+      logger.error('Response validation error', { error });
+      return true; // Default to passing if validation fails
     }
   }
 
@@ -207,35 +440,24 @@ Return a JSON response with this structure:
 Focus on what would actually impact their decision-making process. Be specific and personalized to their profile.`;
 
     try {
-      const result = await this.model.generateContent({
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      const modelConfig = this.aiConfig.models.analysis;
+      const model = this.genAI.getGenerativeModel({ 
+        model: modelConfig.primary,
         generationConfig: {
-          temperature: 0.3,
-          maxOutputTokens: 1500,
-        },
+          temperature: modelConfig.temperature,
+          maxOutputTokens: modelConfig.max_tokens,
+          responseMimeType: "application/json"
+        }
       });
       
-      const response = result.response.text();
-      logger.debug('Raw LLM response for priorities:', { response: response.substring(0, 200) + '...' });
+      const result = await model.generateContent(prompt);
+      const priorities = JSON.parse(result.response.text());
       
-      try {
-        // Extract JSON from markdown code blocks if present
-        let jsonText = response.trim();
-        if (jsonText.startsWith('```json') && jsonText.endsWith('```')) {
-          jsonText = jsonText.slice(7, -3).trim();
-        } else if (jsonText.startsWith('```') && jsonText.endsWith('```')) {
-          jsonText = jsonText.slice(3, -3).trim();
-        }
-        
-        const priorities = JSON.parse(jsonText);
-        logger.debug('Personal priorities analyzed', { 
-          factorCount: priorities.factors.length 
-        });
-        return priorities;
-      } catch (parseError) {
-        logger.error('Failed to parse priorities JSON', { parseError, responseStart: response.substring(0, 200) });
-        throw parseError;
-      }
+      logger.debug('Personal priorities analyzed', { 
+        factorCount: priorities.factors.length 
+      });
+      
+      return priorities;
     } catch (error) {
       logger.error('Failed to analyze personal priorities', { error });
       // Return fallback priorities
@@ -283,14 +505,16 @@ For EXTERNAL recruiters: Focus on client company info, process clarity, role spe
 Return questions in a natural conversational format, not as a bullet list.`;
 
     try {
-      const result = await this.model.generateContent({
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      const modelConfig = this.aiConfig.models.response_generation;
+      const model = this.genAI.getGenerativeModel({ 
+        model: modelConfig.primary,
         generationConfig: {
           temperature: 0.5,
-          maxOutputTokens: 400,
-        },
+          maxOutputTokens: modelConfig.max_tokens,
+        }
       });
       
+      const result = await model.generateContent(prompt);
       const questions = result.response.text().trim();
       
       logger.debug('Initial questions generated', { 
@@ -339,36 +563,25 @@ Return a JSON response:
 Be specific and reference actual details from the conversation.`;
 
     try {
-      const result = await this.model.generateContent({
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      const modelConfig = this.aiConfig.models.analysis;
+      const model = this.genAI.getGenerativeModel({ 
+        model: modelConfig.primary,
         generationConfig: {
-          temperature: 0.3,
-          maxOutputTokens: 600,
-        },
+          temperature: modelConfig.temperature,
+          maxOutputTokens: modelConfig.max_tokens,
+          responseMimeType: "application/json"
+        }
       });
       
-      const response = result.response.text();
-      logger.debug('Raw LLM response for job fit:', { response: response.substring(0, 200) + '...' });
+      const result = await model.generateContent(prompt);
+      const analysis = JSON.parse(result.response.text());
       
-      try {
-        // Extract JSON from markdown code blocks if present
-        let jsonText = response.trim();
-        if (jsonText.startsWith('```json') && jsonText.endsWith('```')) {
-          jsonText = jsonText.slice(7, -3).trim();
-        } else if (jsonText.startsWith('```') && jsonText.endsWith('```')) {
-          jsonText = jsonText.slice(3, -3).trim();
-        }
-        
-        const analysis = JSON.parse(jsonText);
-        logger.debug('Job fit evaluated', { 
-          score: analysis.overallScore,
-          recommendation: analysis.recommendation 
-        });
-        return analysis;
-      } catch (parseError) {
-        logger.error('Failed to parse job fit JSON', { parseError, responseStart: response.substring(0, 200) });
-        throw parseError;
-      }
+      logger.debug('Job fit evaluated', { 
+        score: analysis.overallScore,
+        recommendation: analysis.recommendation 
+      });
+      
+      return analysis;
     } catch (error) {
       logger.error('Failed to evaluate job fit', { error });
       // Return cautious fallback analysis
@@ -385,7 +598,7 @@ Be specific and reference actual details from the conversation.`;
   async generateFollowUpResponse(conversationHistory: ConversationHistory, fitAnalysis: FitAnalysis): Promise<string> {
     const profile = this.yamlConfig.getProfile();
     
-    // Get the latest recruiter message to respond to contextually
+    // Get the latest recruiter message
     const latestRecruiterMessage = conversationHistory.messages
       .filter(m => m.sender === 'recruiter')
       .pop();
@@ -394,18 +607,12 @@ Be specific and reference actual details from the conversation.`;
       throw new Error('No recruiter message found in conversation history');
     }
 
-    // Use strategy agent to analyze conversation and plan response
+    // Use strategy agent for sophisticated analysis
     const strategy = await this.strategyAgent.analyzeConversationState(
       conversationHistory,
       latestRecruiterMessage,
       profile
     );
-    
-    logger.debug('Strategic analysis completed', {
-      phase: strategy.conversationPhase,
-      topGoal: strategy.currentGoals[0]?.type,
-      recruiterStyle: strategy.recruiterProfile.style
-    });
     
     const prompt = `Generate a contextual follow-up response to the recruiter's latest message.
 
@@ -444,32 +651,28 @@ CRITICAL CONVERSATION RULES:
 Generate a natural, human-like follow-up response that actually responds to what they said:`;
 
     try {
-      const result = await this.model.generateContent({
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      const modelConfig = this.aiConfig.models.response_generation;
+      const model = this.genAI.getGenerativeModel({ 
+        model: modelConfig.primary,
         generationConfig: {
           temperature: 0.6,
-          maxOutputTokens: 350,
-        },
+          maxOutputTokens: modelConfig.max_tokens,
+        }
       });
       
+      const result = await model.generateContent(prompt);
       const response = result.response.text().trim();
       
-      logger.debug('Base follow-up response generated', { 
-        recommendation: fitAnalysis.recommendation,
-        responseLength: response.length 
-      });
-
-      // Use strategy agent to optimize the response
+      // Use strategy agent to optimize
       const optimizedResponse = await this.strategyAgent.optimizeResponse(
         response,
         strategy,
         conversationHistory
       );
 
-      logger.debug('Follow-up response optimized', { 
-        originalLength: response.length,
-        optimizedLength: optimizedResponse.length,
-        strategy: strategy.conversationPhase
+      logger.debug('Follow-up response generated', { 
+        recommendation: fitAnalysis.recommendation,
+        responseLength: optimizedResponse.length 
       });
 
       return optimizedResponse;
@@ -481,15 +684,16 @@ Generate a natural, human-like follow-up response that actually responds to what
 
   async testConnection(): Promise<boolean> {
     try {
-      console.log('Testing with model:', config.gemini.model);
-      console.log('API key starts with:', config.gemini.apiKey.substring(0, 10) + '...');
+      const model = this.genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+      const result = await model.generateContent('Say "Hello" in one word');
       
-      const result = await this.model.generateContent('Say "Hello, Gemini is connected!"');
-      const response = result.response.text();
-      logger.info('Gemini connection test successful', { response });
-      return true;
+      if (result.response.text().toLowerCase().includes('hello')) {
+        logger.info('Gemini connection test successful');
+        return true;
+      }
+      
+      return false;
     } catch (error) {
-      console.log('Full error details:', error);
       logger.error('Gemini connection test failed', { error });
       return false;
     }
